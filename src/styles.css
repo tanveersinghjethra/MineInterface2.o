@@ -61,6 +61,7 @@ button {
   cursor: pointer;
   border: none;
   background: none;
+  color: inherit;
 }
 
 .mono {
@@ -141,6 +142,8 @@ header .navLinks,
 
 .topBar nav a,
 header nav a,
+.topBar nav button,
+header nav button,
 .topBar .navLinks span,
 header .navLinks span {
   color: var(--light-green);
@@ -149,7 +152,11 @@ header .navLinks span {
 }
 
 .topBar nav a:hover,
-header nav a:hover {
+header nav a:hover,
+.topBar nav button:hover,
+header nav button:hover,
+.topBar nav button.navActive,
+header nav button.navActive {
   color: var(--white);
 }
 
