@@ -7,6 +7,7 @@ import {
 import { useMineData } from './hooks/useMineData.js';
 import { useAlerts } from './hooks/useAlerts.js';
 import { tiltMagnitude, THRESHOLDS } from './lib/analytics.js';
+import { haversineM } from './lib/geo.js';
 
 import TopBar from './components/TopBar.jsx';
 import MetricCard from './components/MetricCard.jsx';
@@ -21,26 +22,43 @@ import Toast from './components/Toast.jsx';
 const clock = (ts) =>
   new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-/** Turn raw packets into a {time,value} series for the charts. */
 function buildSeries(readings, node, kind) {
   if (!readings?.length || !node) return [];
-  const roll0 = Number(node.baseline_roll_deg) || 0;
-  const pitch0 = Number(node.baseline_pitch_deg) || 0;
-  const baseLen = Number(node.mean_link_length_m) || 80;
 
-  return readings.slice(-60).map((r) => {
+  const window = readings.slice(-60);
+  // Use the first reading in the window as the GPS baseline for displacement
+  const baseline = window[0];
+  const baseLat = Number(baseline.latitude) || 0;
+  const baseLng = Number(baseline.longitude) || 0;
+  const baseAlt = Number(baseline.altitude) || 0;
+
+  return window.map((r) => {
     let value = 0;
+    
     if (kind === 'tilt') {
-      value = tiltMagnitude((Number(r.roll_rate) || 0) - roll0,
-        (Number(r.pitch_rate) || 0) - pitch0);
-    } else if (kind === 'strain') {
-      value = (Number(r.delta_distance_mm) || 0) / baseLen;
-    } else if (kind === 'vibration') {
-      value = Number(r.vibration_rms_g) || 0;
-    } else if (kind === 'distance') {
-      value = Number(r.delta_distance_mm) || 0;
+      value = tiltMagnitude(Number(r.angle_roll) || 0, Number(r.angle_pitch) || 0);
+    } else if (kind === 'accel') {
+      const ax = Number(r.acc_x_ms2) || 0;
+      const ay = Number(r.acc_y_ms2) || 0;
+      const az = Number(r.acc_z_ms2) || 0;
+      value = Number(r.resultant_accel) || Math.sqrt(ax * ax + ay * ay + az * az);
+    } else if (kind === 'gyro') {
+      const rr = Number(r.rate_roll) || 0;
+      const rp = Number(r.rate_pitch) || 0;
+      const ry = Number(r.rate_yaw) || 0;
+      value = Math.sqrt(rr * rr + rp * rp + ry * ry);
+    } else if (kind === 'displacement') {
+      // Compute from GPS coordinate drift (haversine distance from baseline in mm)
+      const curLat = Number(r.latitude) || 0;
+      const curLng = Number(r.longitude) || 0;
+      const curAlt = Number(r.altitude) || 0;
+      if (baseLat && baseLng && curLat && curLng) {
+        const horizM = haversineM([baseLat, baseLng], [curLat, curLng]);
+        const vertM = Math.abs(curAlt - baseAlt);
+        value = Math.sqrt(horizM * horizM + vertM * vertM) * 1000; // convert m to mm
+      }
     }
-    return { time: clock(r.ts), value: +value.toFixed(3) };
+    return { time: clock(r.updated_at), value: +value.toFixed(3) };
   });
 }
 
@@ -50,7 +68,7 @@ export default function App() {
     connection, lastSync, error, refresh,
   } = useMineData();
 
-  const { alerts, sending, dispatch, acknowledge } = useAlerts(site?.id);
+  const { alerts, sending, dispatch, acknowledge } = useAlerts();
 
   const [selectedId, setSelectedId] = useState(null);
   const [mapMode, setMapMode] = useState('risk');
@@ -74,11 +92,14 @@ export default function App() {
   const tiltSeries = useMemo(
     () => buildSeries(readings[selected?.nodeId], selected?.node, 'tilt'),
     [readings, selected]);
-  const distanceSeries = useMemo(
-    () => buildSeries(readings[selected?.nodeId], selected?.node, 'distance'),
+  const accelSeries = useMemo(
+    () => buildSeries(readings[selected?.nodeId], selected?.node, 'accel'),
     [readings, selected]);
-  const vibrationSeries = useMemo(
-    () => buildSeries(readings[selected?.nodeId], selected?.node, 'vibration'),
+  const gyroSeries = useMemo(
+    () => buildSeries(readings[selected?.nodeId], selected?.node, 'gyro'),
+    [readings, selected]);
+  const displacementSeries = useMemo(
+    () => buildSeries(readings[selected?.nodeId], selected?.node, 'displacement'),
     [readings, selected]);
 
   const filtered = useMemo(() => {
@@ -135,8 +156,7 @@ export default function App() {
     const eta = selected.forecast.hoursToThreshold;
     try {
       const res = await dispatch({
-        site_id: site.id,
-        node_id: selected.nodeId,
+        node_number: selected.nodeId,
         severity: selected.severity === 'Low' ? 'Moderate' : selected.severity,
         score: selected.score,
         title: `${selected.severity} subsidence risk at ${selected.nodeCode}`,
@@ -272,28 +292,35 @@ export default function App() {
         <div className="charts">
           <ChartCard
             title="Ground tilt"
-            subtitle={`${selected?.nodeCode || '—'} · deviation from commissioning baseline`}
+            subtitle={`${selected?.nodeCode || '—'} · Deviation from vertical baseline`}
             data={tiltSeries}
             unit="degrees"
             threshold={THRESHOLDS.tiltDeltaDeg.crit}
             color="#4ec9ff"
           />
           <ChartCard
-            title="Inter-node distance change"
-            subtitle={`${selected?.nodeCode || '—'} · negative means the mesh is compressing`}
-            data={distanceSeries}
-            unit="millimetres"
+            title="Resultant Acceleration"
+            subtitle={`${selected?.nodeCode || '—'} · Dynamic ground motion`}
+            data={accelSeries}
+            unit="m/s²"
             threshold={null}
             color="#f5c542"
-            allowNegative
           />
           <ChartCard
-            title="Vibration energy"
-            subtitle={`${selected?.nodeCode || '—'} · RMS over a 2 s window`}
-            data={vibrationSeries}
-            unit="g"
-            threshold={THRESHOLDS.vibrationG.crit}
+            title="Angular Velocity (Gyro)"
+            subtitle={`${selected?.nodeCode || '—'} · Rotational movement rate`}
+            data={gyroSeries}
+            unit="°/s"
+            threshold={null}
             color="#c77dff"
+          />
+          <ChartCard
+            title="Surface Displacement"
+            subtitle={`${selected?.nodeCode || '—'} · Horizontal movement`}
+            data={displacementSeries}
+            unit="mm"
+            threshold={THRESHOLDS.displacementMm.crit}
+            color="#32d583"
           />
         </div>
 

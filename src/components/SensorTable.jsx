@@ -26,7 +26,7 @@ export default function SensorTable({ rows, selectedId, onSelect, query, onQuery
       <div className="sensorTable">
         <div className="thead">
           <span>Node</span><span>Severity</span><span>Score</span>
-          <span>Tilt</span><span>Strain</span><span>Displacement</span><span>Battery</span>
+          <span>Tilt</span><span>Strain</span><span>Displacement</span>
         </div>
         {rows.length === 0 && (
           <p className="tableEmpty">No node matches that filter.</p>
@@ -43,7 +43,6 @@ export default function SensorTable({ rows, selectedId, onSelect, query, onQuery
             <span className="mono">{a.features.tiltDeltaDeg.toFixed(2)}°</span>
             <span className="mono">{a.features.strainMmPerM.toFixed(2)}</span>
             <span className="mono">{a.features.displacementMm.toFixed(0)} mm</span>
-            <span className="mono">{Number(a.node.battery_v ?? 0).toFixed(2)} V</span>
           </button>
         ))}
       </div>

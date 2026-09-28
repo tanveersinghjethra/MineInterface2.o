@@ -10,10 +10,9 @@ import { analyseNode, SEVERITY_RANK, topDrivers } from '../src/lib/analytics.js'
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const SITE_CODE = process.env.SITE_CODE || 'JHARIA-P7';
-const PERIOD_MS = Number(process.env.SCORE_PERIOD_MS || 5000);
 const ALERT_AT = process.env.ALERT_AT || 'High';       // Moderate | High | Critical
 const COOLDOWN_MS = Number(process.env.ALERT_COOLDOWN_MS || 10 * 60 * 1000);
+const PERIOD_MS = Number(process.env.SCORE_PERIOD_MS || 5000);
 
 if (!url || !key) {
   console.error('Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env');
@@ -21,10 +20,15 @@ if (!url || !key) {
 }
 const db = createClient(url, key, { auth: { persistSession: false } });
 
-const prevScore = new Map();     // nodeId -> smoothed score
-const lastAlert = new Map();     // nodeId -> { at, severity }
+const prevScore = new Map();     // nodeNumber -> smoothed score
+const lastAlert = new Map();     // nodeNumber -> { at, severity }
 
-async function raiseAlert(site, analysis) {
+const site = {
+  id: '1', code: 'JHARIA-P7', name: 'Jharia Panel 7',
+  panel_depth_m: 120, seam_thickness_m: 3.0, extraction_ratio: 0.65, angle_of_draw_deg: 35
+};
+
+async function raiseAlert(analysis) {
   const f = analysis.features;
   const drivers = topDrivers(analysis).map((d) => d.label.toLowerCase()).join(', ');
   const eta = analysis.forecast.hoursToThreshold;
@@ -43,8 +47,7 @@ async function raiseAlert(site, analysis) {
     method: 'POST',
     headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      site_id: site.id,
-      node_id: analysis.nodeId,
+      node_number: analysis.nodeId,
       severity: analysis.severity,
       score: analysis.score,
       title: `${analysis.severity} subsidence risk at ${analysis.nodeCode}`,
@@ -58,26 +61,36 @@ async function raiseAlert(site, analysis) {
     `${out.sent ?? 0}/${out.recipients ?? 0} recipients${out.mock ? ' (mock)' : ''}`);
 }
 
-async function cycle(site, nodes, links) {
+async function cycle() {
   const since = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
   const { data: readings, error } = await db
-    .from('sensor_readings').select('*')
-    .gte('ts', since).order('ts', { ascending: true }).limit(8000);
+    .from('telemetry').select('*')
+    .gte('updated_at', since).order('updated_at', { ascending: true }).limit(8000);
   if (error) { console.error(error.message); return; }
 
   const grouped = {};
-  for (const r of readings) (grouped[r.node_id] ||= []).push(r);
+  for (const r of readings) (grouped[r.node_number] ||= []).push(r);
 
   const scoreRows = [];
-  for (const node of nodes) {
-    const hist = grouped[node.id] || [];
+  const nodes = Object.keys(grouped);
+
+  for (const nnStr of nodes) {
+    const nn = Number(nnStr);
+    const hist = grouped[nn];
     if (!hist.length) continue;
-    const nodeLinks = links.filter((l) => l.node_a === node.id || l.node_b === node.id);
-    const a = analyseNode(node, hist, nodeLinks, prevScore.get(node.id) ?? null);
-    prevScore.set(node.id, a.score);
+
+    // Create a mock node object to satisfy the interface
+    const node = {
+      id: nn,
+      node_number: nn,
+      node_code: `MG-${String(nn).padStart(2, '0')}`,
+    };
+
+    const a = analyseNode(node, hist, [], prevScore.get(nn) ?? null);
+    prevScore.set(nn, a.score);
 
     scoreRows.push({
-      node_id: node.id,
+      node_number: nn,
       ts: new Date().toISOString(),
       score: a.score,
       severity: a.severity,
@@ -85,24 +98,22 @@ async function cycle(site, nodes, links) {
       tilt_rate_deg_hr: a.features.tiltRateDegHr,
       strain_mm_per_m: a.features.strainMmPerM,
       displacement_mm: a.features.displacementMm,
-      vibration_rms_g: a.features.vibrationG,
-      deltax: a.features.deltax,
-      deltay: a.features.deltay,
-      deltaz: a.features.deltaz,
+      vibration_detected: a.features.vibrationG > 0,
+      disp_x_m: a.features.deltax / 1000,
+      disp_y_m: a.features.deltay / 1000,
+      disp_z_m: a.features.deltaz / 1000,
       contributions: a.contributions,
       forecast_24h: a.forecast,
       model_version: a.modelVersion,
     });
 
-    // escalation logic: fire on first crossing, then only if it gets worse,
-    // or after the cooldown expires
     if (SEVERITY_RANK[a.severity] >= SEVERITY_RANK[ALERT_AT]) {
-      const prev = lastAlert.get(node.id);
+      const prev = lastAlert.get(nn);
       const worse = !prev || SEVERITY_RANK[a.severity] > SEVERITY_RANK[prev.severity];
       const stale = prev && Date.now() - prev.at > COOLDOWN_MS;
       if (!prev || worse || stale) {
-        lastAlert.set(node.id, { at: Date.now(), severity: a.severity });
-        raiseAlert(site, a).catch((e) => console.error('alert failed', e));
+        lastAlert.set(nn, { at: Date.now(), severity: a.severity });
+        raiseAlert(a).catch((e) => console.error('alert failed', e));
       }
     }
   }
@@ -120,25 +131,12 @@ async function cycle(site, nodes, links) {
 }
 
 async function main() {
-  const { data: site } = await db
-    .from('mine_sites').select('*').eq('code', SITE_CODE).single();
-  const { data: nodes } = await db
-    .from('sensor_nodes').select('*').eq('site_id', site.id);
-  const { data: links } = await db
-    .from('node_links').select('*').eq('site_id', site.id);
-
   console.log(`\nMineGuard scorer`);
-  console.log(`  site ${site.code} · ${nodes.length} nodes · alert at ${ALERT_AT}+`);
+  console.log(`  site ${site.code} · alert at ${ALERT_AT}+`);
   console.log(`  cooldown ${COOLDOWN_MS / 60000} min · period ${PERIOD_MS} ms\n`);
 
-  await cycle(site, nodes, links);
-  const timer = setInterval(async () => {
-    // reload links each cycle: the simulator/gateway keeps updating them
-    const { data: fresh } = await db
-      .from('node_links').select('*').eq('site_id', site.id);
-    await cycle(site, nodes, fresh || links);
-  }, PERIOD_MS);
-
+  await cycle();
+  const timer = setInterval(cycle, PERIOD_MS);
   process.on('SIGINT', () => { clearInterval(timer); console.log('\n  stopped.\n'); process.exit(0); });
 }
 

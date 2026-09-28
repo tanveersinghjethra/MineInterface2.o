@@ -107,21 +107,11 @@ export function extractFeatures(node, readings, links = []) {
   if (!readings || !readings.length) return empty;
 
   const last = readings[readings.length - 1];
-  const b = {
-    roll: Number(node.baseline_roll_deg) || 0,
-    pitch: Number(node.baseline_pitch_deg) || 0,
-    yaw: Number(node.baseline_yaw_deg) || 0,
-    lat: node.baseline_lat ?? node.install_lat,
-    lng: node.baseline_lng ?? node.install_lng,
-  };
 
   // tilt: median of the last 5 packets kills IMU noise
   const tiltSeries = readings.map((r) => ({
-    t: new Date(r.ts).getTime(),
-    v: tiltMagnitude(
-      (Number(r.roll_rate) || 0) - b.roll,
-      (Number(r.pitch_rate) || 0) - b.pitch
-    ),
+    t: new Date(r.updated_at).getTime(),
+    v: tiltMagnitude(Number(r.angle_roll) || 0, Number(r.angle_pitch) || 0),
   }));
   const tiltDeltaDeg = median(tiltSeries.slice(-5).map((p) => p.v));
 
@@ -134,43 +124,68 @@ export function extractFeatures(node, readings, links = []) {
   );
   const tiltRateDegHr = Number.isFinite(slope) ? slope : 0;
 
-  // horizontal strain: prefer measured mesh links, fall back to the
-  // node's own mean delta distance
-  let strainMmPerM = 0;
-  const linkStrains = links
-    .map((l) => Number(l.strain_mm_per_m))
-    .filter(Number.isFinite);
-  if (linkStrains.length) {
-    strainMmPerM = linkStrains.reduce(
-      (m, s) => (Math.abs(s) > Math.abs(m) ? s : m), 0);
+  // Handle uncalibrated 0x7FFF / 1000 = ~32.767m sentinel values from raw telemetry
+  const rawDx = Number(last.disp_x_m) || 0;
+  const rawDy = Number(last.disp_y_m) || 0;
+  const rawDz = Number(last.disp_z_m) || 0;
+  const isSentinel = Math.abs(rawDx - 32.767) < 0.05 || Math.abs(rawDx) > 30;
+
+  let deltax, deltay, deltaz, deltaPos, displacementMm;
+
+  if (isSentinel && readings.length >= 2) {
+    // Fallback: compute displacement from GPS coordinate drift
+    const first = readings[0];
+    const baseLat = Number(first.latitude) || 0;
+    const baseLng = Number(first.longitude) || 0;
+    const baseAlt = Number(first.altitude) || 0;
+    const curLat = Number(last.latitude) || 0;
+    const curLng = Number(last.longitude) || 0;
+    const curAlt = Number(last.altitude) || 0;
+
+    if (baseLat && baseLng && curLat && curLng) {
+      const horizM = haversineM([baseLat, baseLng], [curLat, curLng]);
+      const vertM = curAlt - baseAlt;
+      // Approximate dx/dy from lat/lng deltas in mm
+      deltax = (curLat - baseLat) * 111320 * 1000;   // mm northward
+      deltay = (curLng - baseLng) * 111320 * Math.cos(curLat * Math.PI / 180) * 1000; // mm eastward
+      deltaz = vertM * 1000; // mm vertical
+      displacementMm = horizM * 1000;
+      deltaPos = Math.sqrt(displacementMm * displacementMm + deltaz * deltaz);
+    } else {
+      deltax = deltay = deltaz = deltaPos = displacementMm = 0;
+    }
+  } else if (!isSentinel) {
+    deltax = rawDx * 1000;
+    deltay = rawDy * 1000;
+    deltaz = rawDz * 1000;
+    deltaPos = Math.sqrt(deltax * deltax + deltay * deltay + deltaz * deltaz);
+    displacementMm = Math.sqrt(deltax * deltax + deltay * deltay);
   } else {
-    const baseLen = Number(node.mean_link_length_m) || 80;
-    strainMmPerM = (Number(last.delta_distance_mm) || 0) / baseLen;
+    deltax = deltay = deltaz = deltaPos = displacementMm = 0;
   }
 
-  // GPS displacement: median over the last 9 usable fixes
-  const fixes = readings
-    .slice(-9)
-    .filter((r) =>
-      Number.isFinite(Number(r.gps_lat)) &&
-      Number.isFinite(Number(r.gps_lng)) &&
-      (r.hdop == null || Number(r.hdop) <= GPS_HDOP_LIMIT))
-    .map((r) => haversineM([b.lat, b.lng], [Number(r.gps_lat), Number(r.gps_lng)]) * 1000);
-  const displacementMm = median(fixes);
+  // horizontal strain: fall back to the node's own delta distance
+  const baseLen = 80;
+  const strainMmPerM = deltaPos / baseLen;
 
-  const vibrationG = Math.max(
-    ...readings.slice(-3).map((r) => Number(r.vibration_rms_g) || 0), 0);
-  const deltax = Number(last.deltax) || 0;
-  const deltay = Number(last.deltay) || 0;
-  const deltaz = Number(last.deltaz) || 0;
-  const deltaPos = Math.sqrt(deltax * deltax + deltay * deltay + deltaz * deltaz);
-  const yawDriftDeg = ((Number(last.yaw_rate) || 0) - b.yaw + 540) % 360 - 180;
+  // Vibration: check hardware flag OR accelerometer deviation from 1g (9.81 m/s^2)
+  const rawAx = Number(last.acc_x_ms2) || 0;
+  const rawAy = Number(last.acc_y_ms2) || 0;
+  const rawAz = Number(last.acc_z_ms2) || 0;
+  const resAccel = Number(last.resultant_accel) || Math.sqrt(rawAx * rawAx + rawAy * rawAy + rawAz * rawAz);
+  const accelDevG = Math.abs(resAccel - 9.81) / 9.81;
+  const vibrationG = readings.slice(-3).some(r => r.vibration_detected)
+    ? 0.5
+    : Math.min(2.0, accelDevG);
+
+  const yawDriftDeg = Number(last.angle_yaw) || 0;
 
   return {
     tiltDeltaDeg, tiltRateDegHr, strainMmPerM, displacementMm,
     vibrationG, deltaPos, deltax, deltay, deltaz, yawDriftDeg,
+    resAccel, accelDevG,
     sampleCount: readings.length,
-    lastTs: last.ts,
+    lastTs: last.updated_at,
   };
 }
 
@@ -239,22 +254,43 @@ export function forecast(readings, node, links = [], horizonH = 24) {
   if (!readings || readings.length < 4) {
     return { tilt24h: 0, strain24h: 0, hoursToThreshold: null, confidence: 0, trend: 'stable' };
   }
-  const b = {
-    roll: Number(node.baseline_roll_deg) || 0,
-    pitch: Number(node.baseline_pitch_deg) || 0,
-  };
-  const t0 = new Date(readings[0].ts).getTime();
+  const t0 = new Date(readings[0].updated_at).getTime();
   const toH = (ts) => (new Date(ts).getTime() - t0) / 3600000;
 
   const tiltPts = readings.map((r) => ({
-    x: toH(r.ts),
-    y: tiltMagnitude((Number(r.roll_rate) || 0) - b.roll, (Number(r.pitch_rate) || 0) - b.pitch),
+    x: toH(r.updated_at),
+    y: tiltMagnitude(Number(r.angle_roll) || 0, Number(r.angle_pitch) || 0),
   }));
-  const baseLen = Number(node.mean_link_length_m) || 80;
-  const strainPts = readings.map((r) => ({
-    x: toH(r.ts),
-    y: (Number(r.delta_distance_mm) || 0) / baseLen,
-  }));
+  const baseLat = Number(readings[0].latitude) || 0;
+  const baseLng = Number(readings[0].longitude) || 0;
+  const baseAlt = Number(readings[0].altitude) || 0;
+  const baseLen = 80;
+
+  const strainPts = readings.map((r) => {
+    const rawDx = Number(r.disp_x_m) || 0;
+    const isSentinel = Math.abs(rawDx - 32.767) < 0.05 || Math.abs(rawDx) > 30;
+    let dist;
+
+    if (isSentinel) {
+      // Use GPS coordinate drift from first reading as displacement
+      const curLat = Number(r.latitude) || 0;
+      const curLng = Number(r.longitude) || 0;
+      const curAlt = Number(r.altitude) || 0;
+      if (baseLat && baseLng && curLat && curLng) {
+        const horizM = haversineM([baseLat, baseLng], [curLat, curLng]);
+        const vertM = Math.abs(curAlt - baseAlt);
+        dist = Math.sqrt(horizM * horizM + vertM * vertM) * 1000; // mm
+      } else {
+        dist = 0;
+      }
+    } else {
+      const dx = rawDx * 1000;
+      const dy = (Number(r.disp_y_m) || 0) * 1000;
+      const dz = (Number(r.disp_z_m) || 0) * 1000;
+      dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    return { x: toH(r.updated_at), y: dist / baseLen };
+  });
 
   const tiltFit = linreg(tiltPts);
   const strainFit = linreg(strainPts);
@@ -302,7 +338,7 @@ export function analyseNode(node, readings, links = [], prevScore = null) {
   const smoothed = +Math.min(1, Math.max(0, ewma(prevScore, scored.score, 0.35))).toFixed(4);
   const fc = forecast(readings, node, links);
   return {
-    nodeId: node.id,
+    nodeId: node.id ?? node.node_number,
     nodeCode: node.node_code,
     features,
     parts: scored.parts,

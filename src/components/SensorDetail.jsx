@@ -108,22 +108,22 @@ export default function SensorDetail({ analysis, onSendAlert, sending }) {
 
       <div className="rawGrid">
         <div><Compass size={13} /><span>Roll / Pitch / Yaw</span>
-          <b>{Number(latest?.roll_rate ?? 0).toFixed(2)}° · {Number(latest?.pitch_rate ?? 0).toFixed(2)}° · {Number(latest?.yaw_rate ?? 0).toFixed(1)}°</b>
+          <b>{Number(latest?.angle_roll ?? 0).toFixed(2)}° · {Number(latest?.angle_pitch ?? 0).toFixed(2)}° · {Number(latest?.angle_yaw ?? 0).toFixed(1)}°</b>
         </div>
-        <div><Activity size={13} /><span>Delta X / Y / Z</span>
+        <div><Activity size={13} /><span>Accel (X/Y/Z) & Resultant</span>
+          <b>{Number(latest?.acc_x_ms2 ?? 0).toFixed(2)} / {Number(latest?.acc_y_ms2 ?? 0).toFixed(2)} / {Number(latest?.acc_z_ms2 ?? 0).toFixed(2)} m/s² · <span style={{color: '#f5c542'}}>{features.resAccel?.toFixed(2)} m/s²</span></b>
+        </div>
+        <div><Activity size={13} /><span>Gyro Rates (R/P/Y)</span>
+          <b>{Number(latest?.rate_roll ?? 0).toFixed(1)} / {Number(latest?.rate_pitch ?? 0).toFixed(1)} / {Number(latest?.rate_yaw ?? 0).toFixed(1)} °/s</b>
+        </div>
+        <div><Waves size={13} /><span>Delta X / Y / Z</span>
           <b>{features.deltax.toFixed(2)} / {features.deltay.toFixed(2)} / {features.deltaz.toFixed(2)} mm</b>
         </div>
-        <div><Waves size={13} /><span>3D positional shift</span>
-          <b>{features.deltaPos.toFixed(1)} mm</b>
+        <div><MapPin size={13} /><span>GNSS fix & Altitude</span>
+          <b>{latest?.latitude ? fmtLatLng(latest.latitude, latest.longitude) : '—'} · {latest?.altitude ? `${Number(latest.altitude).toFixed(1)} m` : '—'}</b>
         </div>
-        <div><MapPin size={13} /><span>GNSS fix</span>
-          <b>{latest?.gps_lat ? fmtLatLng(latest.gps_lat, latest.gps_lng) : '—'}</b>
-        </div>
-        <div><Signal size={13} /><span>Link quality</span>
-          <b>{latest?.rssi_dbm ?? '—'} dBm · {latest?.satellites ?? '—'} sats · HDOP {Number(latest?.hdop ?? 0).toFixed(1)}</b>
-        </div>
-        <div><BatteryMedium size={13} /><span>Battery</span>
-          <b>{Number(latest?.battery_v ?? 0).toFixed(2)} V</b>
+        <div><Signal size={13} /><span>Latest Sequence</span>
+          <b>#{latest?.sequence_number ?? '—'} · {latest?.is_high_precision ? 'RTK Fixed' : 'Float'}</b>
         </div>
       </div>
 

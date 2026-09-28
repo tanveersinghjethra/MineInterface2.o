@@ -1,25 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabaseClient.js';
 
-export function useAlerts(siteId, limit = 25) {
+export function useAlerts(limit = 25) {
   const [alerts, setAlerts] = useState([]);
   const [sending, setSending] = useState(false);
 
   const load = useCallback(async () => {
-    if (!siteId) return;
     const { data, error } = await supabase
       .from('alerts').select('*')
-      .eq('site_id', siteId)
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) { console.error('[mineguard] alerts load', error); return; }
     setAlerts(data || []);
-  }, [siteId, limit]);
+  }, [limit]);
 
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    if (!siteId) return undefined;
     const ch = supabase
       .channel('mineguard-alerts')
       .on('postgres_changes',
@@ -27,7 +24,7 @@ export function useAlerts(siteId, limit = 25) {
         () => load())
       .subscribe();
     return () => supabase.removeChannel(ch);
-  }, [siteId, load]);
+  }, [load]);
 
   /** Fire the early-warning Edge Function. Returns the function's JSON. */
   const dispatch = useCallback(async (payload) => {

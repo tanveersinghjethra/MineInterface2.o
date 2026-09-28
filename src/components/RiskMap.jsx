@@ -15,13 +15,18 @@ const strainColor = (s) => {
   return a >= 6 ? '#ff4d5f' : a >= 2 ? '#ff8a34' : a >= 0.5 ? '#f5c542' : '#3f5563';
 };
 
-/** Keeps the viewport around the mesh whenever the node set changes. */
 function FitToMesh({ points }) {
   const map = useMap();
   React.useEffect(() => {
-    if (points.length < 2) return;
-    map.fitBounds(points, { padding: [40, 40], maxZoom: 17 });
-  }, [map, points.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!points || !points.length) return;
+    if (points.length === 1) {
+      if (points[0][0] && points[0][1]) {
+        map.setView(points[0], 16);
+      }
+    } else {
+      map.fitBounds(points, { padding: [40, 40], maxZoom: 17 });
+    }
+  }, [map, points]);
   return null;
 }
 
@@ -34,9 +39,11 @@ export default function RiskMap({
     () => analyses.map((a) => [a.node.install_lat, a.node.install_lng]),
     [analyses]);
 
-  const center = site
-    ? [site.centroid_lat, site.centroid_lng]
-    : points[0] || [23.748, 86.42];
+  const center = useMemo(() => {
+    if (points.length > 0 && points[0][0] && points[0][1]) return points[0];
+    if (site?.centroid_lat && site?.centroid_lng) return [site.centroid_lat, site.centroid_lng];
+    return [30.358, 76.368];
+  }, [points, site]);
 
   // angle of draw: limit of the zone that can be affected by the workings
   const influenceR = site

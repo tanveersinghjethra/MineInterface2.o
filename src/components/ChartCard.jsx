@@ -21,7 +21,7 @@ export default function ChartCard({
           <small>{subtitle}</small>
         </div>
         <div className="chartNow" style={{ color }}>
-          {latest}<em>{unit === 'degrees' ? '°' : unit === 'g' ? ' g' : ' mm'}</em>
+          {latest}<em>{unit === 'degrees' || unit === '°' ? '°' : unit === '°/s' ? ' °/s' : unit === 'm/s²' ? ' m/s²' : unit === 'g' ? ' g' : unit === 'mm' ? ' mm' : ` ${unit}`}</em>
         </div>
       </div>
 

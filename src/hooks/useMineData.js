@@ -1,54 +1,60 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { supabase, SITE_CODE } from '../lib/supabaseClient.js';
+import { supabase } from '../lib/supabaseClient.js';
 import { analyseNode, HISTORY_LIMIT } from '../lib/analytics.js';
 
 const FLUSH_MS = 900;          // batch incoming packets into one render
 const WINDOW_HOURS = 6;        // history depth pulled on first load
 
-export function useMineData(siteCode = SITE_CODE) {
-  const [site, setSite] = useState(null);
-  const [nodes, setNodes] = useState([]);
-  const [links, setLinks] = useState([]);
-  const [readings, setReadings] = useState({});   // nodeId -> ascending array
+export function useMineData() {
+  const [nodes, setNodes] = useState([]);       // unique node_numbers seen
+  const [readings, setReadings] = useState({});  // node_number -> ascending array
   const [connection, setConnection] = useState('connecting');
   const [lastSync, setLastSync] = useState(null);
   const [error, setError] = useState(null);
 
   const buffer = useRef([]);
-  const prevScores = useRef(new Map());           // nodeId -> { ts, score }
+  const prevScores = useRef(new Map());           // nodeNumber -> { ts, score }
 
   // ── initial load ──────────────────────────────────────────
   const load = useCallback(async () => {
     try {
       setError(null);
 
-      const { data: siteRow, error: e1 } = await supabase
-        .from('mine_sites').select('*').eq('code', siteCode).single();
+      let { data: readRows, error: e1 } = await supabase
+        .from('telemetry').select('*')
+        .order('updated_at', { ascending: false })
+        .limit(2000);
       if (e1) throw e1;
-      setSite(siteRow);
+      
+      if (readRows && readRows.length) {
+        readRows = readRows.reverse();
+      }
 
-      const { data: nodeRows, error: e2 } = await supabase
-        .from('sensor_nodes').select('*')
-        .eq('site_id', siteRow.id).order('node_code');
-      if (e2) throw e2;
-      setNodes(nodeRows || []);
-
-      const { data: linkRows, error: e3 } = await supabase
-        .from('node_links').select('*').eq('site_id', siteRow.id);
-      if (e3) throw e3;
-      setLinks(linkRows || []);
-
-      const since = new Date(Date.now() - WINDOW_HOURS * 3600 * 1000).toISOString();
-      const { data: readRows, error: e4 } = await supabase
-        .from('sensor_readings').select('*')
-        .gte('ts', since).order('ts', { ascending: true }).limit(6000);
-      if (e4) throw e4;
-
+      // Discover unique nodes from the data
+      const nodeSet = new Map();
       const grouped = {};
-      for (const r of readRows || []) (grouped[r.node_id] ||= []).push(r);
+      for (const r of readRows || []) {
+        const nn = r.node_number;
+        if (!nodeSet.has(nn)) {
+          nodeSet.set(nn, {
+            id: nn,
+            node_number: nn,
+            node_code: `MG-${String(nn).padStart(2, '0')}`,
+            label: `Sensor Node ${nn}`,
+            mesh_role: 'telemetry-node',
+            radio: 'LoRa / IoT',
+            status: 'online',
+            install_lat: Number(r.latitude) || 30.3583 + (nn - 1) * 0.0003,
+            install_lng: Number(r.longitude) || 76.3676 + (nn - 1) * 0.0004,
+          });
+        }
+        (grouped[nn] ||= []).push(r);
+      }
       for (const k of Object.keys(grouped)) {
         grouped[k] = grouped[k].slice(-HISTORY_LIMIT);
       }
+
+      setNodes(Array.from(nodeSet.values()));
       setReadings(grouped);
       setLastSync(new Date());
     } catch (err) {
@@ -62,31 +68,17 @@ export function useMineData(siteCode = SITE_CODE) {
       } catch { /* ignore */ }
       setError(err.message || String(err));
     }
-  }, [siteCode]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
   // ── realtime subscription ─────────────────────────────────
   useEffect(() => {
-    if (!site) return undefined;
-
     const channel = supabase
       .channel('mineguard-stream')
       .on('postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'sensor_readings' },
+        { event: 'INSERT', schema: 'public', table: 'telemetry' },
         (payload) => { buffer.current.push(payload.new); })
-      .on('postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'node_links' },
-        (payload) => {
-          setLinks((prev) =>
-            prev.map((l) => (l.id === payload.new.id ? payload.new : l)));
-        })
-      .on('postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'sensor_nodes' },
-        (payload) => {
-          setNodes((prev) =>
-            prev.map((n) => (n.id === payload.new.id ? { ...n, ...payload.new } : n)));
-        })
       .subscribe((s) => {
         setConnection(
           s === 'SUBSCRIBED' ? 'live'
@@ -98,11 +90,36 @@ export function useMineData(siteCode = SITE_CODE) {
       if (!buffer.current.length) return;
       const batch = buffer.current;
       buffer.current = [];
+
+      // Discover new nodes from realtime
+      setNodes((prev) => {
+        const existing = new Set(prev.map((n) => n.node_number));
+        const newNodes = [...prev];
+        for (const r of batch) {
+          if (!existing.has(r.node_number)) {
+            existing.add(r.node_number);
+            newNodes.push({
+              id: r.node_number,
+              node_number: r.node_number,
+              node_code: `MG-${String(r.node_number).padStart(2, '0')}`,
+              label: `Sensor Node ${r.node_number}`,
+              mesh_role: 'telemetry-node',
+              radio: 'LoRa / IoT',
+              status: 'online',
+              install_lat: Number(r.latitude) || 30.3583 + (r.node_number - 1) * 0.0003,
+              install_lng: Number(r.longitude) || 76.3676 + (r.node_number - 1) * 0.0004,
+            });
+          }
+        }
+        return newNodes.length !== prev.length ? newNodes : prev;
+      });
+
       setReadings((prev) => {
         const next = { ...prev };
         for (const r of batch) {
-          const arr = next[r.node_id] ? [...next[r.node_id], r] : [r];
-          next[r.node_id] = arr.slice(-HISTORY_LIMIT);
+          const nn = r.node_number;
+          const arr = next[nn] ? [...next[nn], r] : [r];
+          next[nn] = arr.slice(-HISTORY_LIMIT);
         }
         return next;
       });
@@ -110,25 +127,23 @@ export function useMineData(siteCode = SITE_CODE) {
     }, FLUSH_MS);
 
     return () => { clearInterval(timer); supabase.removeChannel(channel); };
-  }, [site]);
+  }, []);
 
   // ── AI analysis (idempotent EWMA, safe under StrictMode) ──
   const analyses = useMemo(() => {
     return nodes.map((node) => {
-      const hist = readings[node.id] || [];
-      const nodeLinks = links.filter(
-        (l) => l.node_a === node.id || l.node_b === node.id);
-      const lastTs = hist.length ? hist[hist.length - 1].ts : null;
-      const cached = prevScores.current.get(node.id);
+      const hist = readings[node.node_number] || [];
+      const lastTs = hist.length ? hist[hist.length - 1].updated_at : null;
+      const cached = prevScores.current.get(node.node_number);
       const prev = cached && cached.ts === lastTs ? cached.prev : cached?.score ?? null;
 
-      const a = analyseNode(node, hist, nodeLinks, prev);
-      prevScores.current.set(node.id, { ts: lastTs, score: a.score, prev });
+      const a = analyseNode(node, hist, [], prev);
+      prevScores.current.set(node.node_number, { ts: lastTs, score: a.score, prev });
 
       const latest = hist[hist.length - 1] || null;
-      return { ...a, node, latest, links: nodeLinks, historyLength: hist.length };
+      return { ...a, node, latest, links: [], historyLength: hist.length };
     });
-  }, [nodes, links, readings]);
+  }, [nodes, readings]);
 
   // offline snapshot cache
   useEffect(() => {
@@ -136,7 +151,6 @@ export function useMineData(siteCode = SITE_CODE) {
     try {
       localStorage.setItem('mineguard:snapshot', JSON.stringify({
         at: Date.now(),
-        site,
         nodes: analyses.map((a) => ({
           code: a.nodeCode, score: a.score, severity: a.severity,
           lat: a.node.install_lat, lng: a.node.install_lng,
@@ -144,7 +158,7 @@ export function useMineData(siteCode = SITE_CODE) {
         })),
       }));
     } catch { /* storage full or blocked */ }
-  }, [analyses, site]);
+  }, [analyses]);
 
   const byId = useMemo(
     () => Object.fromEntries(analyses.map((a) => [a.nodeId, a])), [analyses]);
@@ -170,8 +184,33 @@ export function useMineData(siteCode = SITE_CODE) {
     };
   }, [analyses, nodes]);
 
+  const site = useMemo(() => {
+    let lat = 30.3583;
+    let lng = 76.3676;
+    if (nodes.length > 0) {
+      const valid = nodes.filter(n => n.install_lat && n.install_lng);
+      if (valid.length > 0) {
+        lat = valid.reduce((s, n) => s + n.install_lat, 0) / valid.length;
+        lng = valid.reduce((s, n) => s + n.install_lng, 0) / valid.length;
+      }
+    }
+    return {
+      id: '1',
+      code: import.meta.env.VITE_SITE_CODE || 'LIVE-MESH',
+      name: 'Mine Telemetry Grid',
+      district: 'Sector Alpha',
+      state: 'Live Feed',
+      centroid_lat: lat,
+      centroid_lng: lng,
+      panel_depth_m: 120,
+      seam_thickness_m: 3.0,
+      extraction_ratio: 0.65,
+      angle_of_draw_deg: 35,
+    };
+  }, [nodes]);
+
   return {
-    site, nodes, links, readings, analyses, byId, summary,
+    site, nodes, links: [], readings, analyses, byId, summary,
     connection, lastSync, error, refresh: load,
   };
 }
