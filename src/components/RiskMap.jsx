@@ -36,7 +36,10 @@ export default function RiskMap({
   const [basemap, setBasemap] = React.useState('street');
 
   const points = useMemo(
-    () => analyses.map((a) => [a.node.install_lat, a.node.install_lng]),
+    () => analyses.map((a) => [
+      a.latest?.latitude ? Number(a.latest.latitude) : a.node.install_lat,
+      a.latest?.longitude ? Number(a.latest.longitude) : a.node.install_lng,
+    ]),
     [analyses]);
 
   const center = useMemo(() => {
@@ -210,7 +213,10 @@ export default function RiskMap({
             return (
               <CircleMarker
                 key={a.nodeId}
-                center={[a.node.install_lat, a.node.install_lng]}
+                center={[
+                  a.latest?.latitude ? Number(a.latest.latitude) : a.node.install_lat,
+                  a.latest?.longitude ? Number(a.latest.longitude) : a.node.install_lng,
+                ]}
                 radius={isSel ? 11 : a.node.mesh_role === 'gateway' ? 9 : 7}
                 pathOptions={{
                   color: isSel ? '#e8f1f8' : '#0b1116',
